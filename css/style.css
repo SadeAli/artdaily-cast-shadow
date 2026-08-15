@@ -387,6 +387,16 @@ a { color: inherit; }
    game-specific styles below this line
    ============================================================ */
 
+/* Canvas line-work amber. --game-accent (--sunny) is a wash colour: it
+   is lovely under a shadow but only 1.8:1 against the paper card, so
+   line work drawn in it would fail AA on the light sheet. --game-line
+   is the same amber taken down to graphite weight for the strokes that
+   MEAN something (the true shadow's outline, the true rays): 4.5:1 on
+   paper, 9:1 on the night sheet. game.js reads both via
+   getComputedStyle inside draw(), so a theme flip repaints correctly. */
+:root { --game-line: #9C6A18; }
+:root[data-theme="dark"] { --game-line: #F2B345; }
+
 /* cast-shadow: the done/next sticker rides the canvas corner */
 .stage-btn {
   position: absolute;
@@ -395,4 +405,15 @@ a { color: inherit; }
   margin: 0;
   min-height: 44px;
   min-width: 96px;
+}
+
+/* On narrow canvases the corner sticker would sit ON the ground
+   plane — covering true landings and stealing regrab taps — so it
+   steps off the sheet and becomes a plain row under the canvas. */
+@media (max-width: 640px) {
+  .stage-btn {
+    position: static;
+    display: block;
+    margin: 10px auto 0;
+  }
 }

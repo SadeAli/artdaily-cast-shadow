@@ -49,9 +49,9 @@
       <p class="hint" id="hint">Loading…</p>
 
       <div class="game-stage">
-        <canvas class="game-canvas" id="gameCanvas" tabindex="0" role="img" aria-label="Cast Shadow drill area — drag the four shadow handles; keys 1–4 pick a handle, arrows nudge it"></canvas>
+        <canvas class="game-canvas" id="gameCanvas" tabindex="0" role="img" aria-label="Cast Shadow drill area — drag a ray from each numbered top corner down to where its shadow lands; keys 1 to 4 pick a corner, arrows run and nudge its landing, Enter presses done"></canvas>
         <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
-        <button class="btn stage-btn" id="btnDone">done ✓</button>
+        <button class="btn stage-btn" id="btnDone" disabled>run all 4 rays</button>
       </div>
 
       <div class="game-controls">
@@ -60,9 +60,11 @@
       </div>
       <div class="howto" id="howTo" hidden>
         <p class="howto-cmd" aria-hidden="true"><span class="prompt">$</span> man cast-shadow</p>
-        <p>The stick's shadow is the given — it shows the sun's direction and how far one stick-height of shadow runs.</p>
-        <p>Drag the four handles to where the box's top corners land, press done, and the true shadow inks itself in amber.</p>
-        <p>Scored on how close each handle sits to its true landing. Studio tip: a cast shadow is a projection, not a smudge — run one ray per corner, then connect the landings.</p>
+        <p>The stick's shadow is the given — your ruler. It shows the sun's direction and how far one stick-height of shadow runs. The sun is at infinity, so the arrows at the frame edge are the whole story: every ray runs that same direction, and the run scales with height.</p>
+        <p>Run one ray per corner: press a numbered top corner and pull down to where its shadow lands. Four rays, then done — and the true shadow inks itself in amber over yours, with a dotted hop from each of your landings to its true one.</p>
+        <p>From item 2 the top is a tilted plane, so the four corners sit at four different heights and each ray is its own length. Numbers pair a corner with its landing; that pairing is what the score compares.</p>
+        <p>Keys: <b>1–4</b> pick a corner · <b>arrows</b> run and nudge its landing (shift for bigger steps) · <b>Enter</b> done, then next, then new round.</p>
+        <p>Scored on how close each landing sits to its true one. Studio tip: a cast shadow is a projection, not a smudge — run the rays, then connect the landings.</p>
       </div>
 
       <noscript><p class="hint">This drill needs JavaScript — nothing else, no trackers, no accounts.</p></noscript>

@@ -1,11 +1,14 @@
 /* ============================================================
-   game.js — Cast Shadow. A box on a gridded ground plane, a sun
-   pinned at the frame edge, and a gnomon stick whose true shadow
-   is always drawn (the given). The player drags the box's four
-   projected top-corner handles to build its cast shadow; "done"
-   scores against the exact projection and reveals it in amber.
-   One consistent oblique view transform for everything; scoring
-   math is pure (ground units in, 0–100 out) and lives up top.
+   game.js — Cast Shadow. A form on a gridded ground plane, a
+   directional sun (parallel rays, no finite disc to aim at), and a
+   gnomon stick whose true shadow is always drawn — the given, your
+   ruler. The player runs one light ray per top corner, dragging
+   from the corner down to where it lands; "done" scores against the
+   exact projection and reveals it in amber. From item 2 the top is
+   a tilted plane, so the four corners sit at four different heights
+   and each ray has its own length. One consistent oblique view
+   transform for everything; scoring math is pure (ground units in,
+   0–100 out) and lives up top.
    ============================================================ */
 (function () {
   'use strict';
@@ -15,13 +18,20 @@
   var DEG = Math.PI / 180;
   var GX = 10, GZ = 6;   /* visible ground patch, in grid units */
   var GNOMON_H = 0.9;    /* height of the given stick */
-  var HANDLE_HIT = 30;   /* px pick radius → a 60px hit disc */
+  var MONO = 'ui-monospace, Menlo, Consolas, monospace';
 
   /* ================= pure projection & scoring =================
      Directional light: azimuth az° in the ground plane (0 = +x,
      CCW) and altitude alt° above the horizon. A point at height h
      drops its shadow away from the sun by h / tan(alt) — the
      spec's S = P − L·(P.h / L.h) written out in ground coords. */
+
+  /* Unit vector pointing AT the sun — the real 3D light direction
+     that both the shading and the reveal rays are built from. */
+  function sunVector(azDeg, altDeg) {
+    var a = azDeg * DEG, al = altDeg * DEG, ca = Math.cos(al);
+    return { x: Math.cos(a) * ca, y: Math.sin(al), z: Math.sin(a) * ca };
+  }
 
   function shadowOffset(azDeg, altDeg, h) {
     var run = h / Math.tan(altDeg * DEG);
@@ -31,6 +41,35 @@
   function projectCorner(fx, fz, h, azDeg, altDeg) {
     var o = shadowOffset(azDeg, altDeg, h);
     return { x: fx + o.x, z: fz + o.z };
+  }
+
+  /* The top is a real plane: height h0 at (cx,cz), sloping gx per
+     unit of ground x and gz per unit of ground z. Level 1 is flat
+     (gx = gz = 0) — a plain box; after that it is a wedge, so the
+     four corners genuinely differ instead of sharing one offset. */
+  function topHeight(top, x, z) {
+    return top.h0 + top.gx * (x - top.cx) + top.gz * (z - top.cz);
+  }
+
+  /* Outward unit normal of that top plane — the actual surface the
+     light meets, not a stand-in for one. */
+  function topNormal(top) {
+    var l = Math.sqrt(1 + top.gx * top.gx + top.gz * top.gz);
+    return { x: -top.gx / l, y: 1 / l, z: -top.gz / l };
+  }
+
+  /* Outward unit normal of the vertical wall on footprint edge a→b.
+     The footprint runs CCW, so (dz, 0, −dx) points away from the
+     solid. */
+  function wallNormal(a, b) {
+    var ex = b.x - a.x, ez = b.z - a.z, l = Math.hypot(ex, ez) || 1;
+    return { x: ez / l, y: 0, z: -ex / l };
+  }
+
+  /* Real lambert: surface normal · light direction, both unit 3D. */
+  function lambert(n, L) {
+    var d = n.x * L.x + n.y * L.y + n.z * L.z;
+    return d < 0 ? 0 : (d > 1 ? 1 : d);
   }
 
   function boundingDiag(pts) {
@@ -48,15 +87,26 @@
   /* Mean handle→truth distance, normalized by the true shadow's
      bounding diagonal: 100·clamp(1 − meanErr/0.28, 0, 1). A tiny
      dead-zone (0.012 diagonals ≈ a couple of px) is forgiven first
-     so a pixel-perfect drag can genuinely reach 100. */
+     so a pixel-perfect construction can genuinely reach 100. Also
+     returns the per-corner errors, so the reveal can point at the
+     one that went wrong. */
   function itemScore(handles, truths, diag) {
-    if (!truths.length || !handles.length) return 0;
-    var sum = 0, i;
-    for (i = 0; i < truths.length; i++) {
-      sum += Math.hypot(handles[i].x - truths[i].x, handles[i].z - truths[i].z);
+    var errs = [], i, sum = 0, d = diag || 1;
+    if (!truths.length || handles.length !== truths.length) {
+      return { score: 0, errs: errs };
     }
-    var meanErr = Math.max(0, (sum / truths.length) / (diag || 1) - 0.012);
-    return 100 * Math.max(0, Math.min(1, 1 - meanErr / 0.28));
+    for (i = 0; i < truths.length; i++) {
+      errs.push(Math.hypot(handles[i].x - truths[i].x, handles[i].z - truths[i].z) / d);
+      sum += errs[i];
+    }
+    var meanErr = Math.max(0, sum / truths.length - 0.012);
+    return { score: 100 * Math.max(0, Math.min(1, 1 - meanErr / 0.28)), errs: errs };
+  }
+
+  function worstCorner(errs) {
+    var k = 0, i;
+    for (i = 1; i < errs.length; i++) if (errs[i] > errs[k]) k = i;
+    return k;
   }
 
   function roundScore(scores) {
@@ -79,7 +129,7 @@
   }
 
   /* Andrew monotone chain — the drawn shadow region is the hull of
-     footprint ∪ (dragged or true) landings. */
+     footprint ∪ (landed or true) landings. */
   function convexHull(pts) {
     var p = pts.slice().sort(function (a, b) { return a.x - b.x || a.z - b.z; });
     if (p.length < 3) return p;
@@ -111,14 +161,19 @@
 
   ArtDaily.init({ slug: SLUG });
 
-  /* ---- theme-aware inks (re-read on every repaint) ---- */
+  /* ---- theme-aware inks (re-read on every repaint) ----
+     accent is the wash amber (fills, haloes); line is the same amber at
+     graphite weight, for the strokes that carry meaning — the wash is
+     only 1.8:1 on the paper card, the line clears AA in both themes. */
   function inks() {
     var cs = getComputedStyle(document.documentElement);
+    var accent = cs.getPropertyValue('--game-accent').trim() || cs.getPropertyValue('--sunny').trim();
     return {
       ink: cs.getPropertyValue('--ink').trim(),
       muted: cs.getPropertyValue('--muted').trim(),
       card: cs.getPropertyValue('--card').trim(),
-      accent: cs.getPropertyValue('--game-accent').trim() || cs.getPropertyValue('--sunny').trim(),
+      accent: accent,
+      line: cs.getPropertyValue('--game-line').trim() || accent,
     };
   }
 
@@ -141,12 +196,17 @@
   function makeView() {
     var s = W / 14;
     view = {
+      s: s,
       ox: 0.8 * s, oy: H - 1.1 * s,
       exx: s, exy: 0,
       ezx: 0.42 * s, ezy: -0.52 * s,
       eyy: -0.88 * s,
     };
   }
+
+  /* Pick radius follows the view instead of being 30px everywhere:
+     ~1 grid unit at any size, floored so touch targets stay ≥44px. */
+  function hitRadius() { return clamp(1.05 * view.s, 22, 34); }
 
   function toScreen(gx, gz, h) {
     return {
@@ -169,28 +229,37 @@
   function inGround(p, m) { return p.x >= m && p.x <= GX - m && p.z >= m && p.z <= GZ - m; }
 
   /* ==================== item generation ==================== */
-  /* Ramp: item 1 high sun / short shadow / square-on box; item 3
-     low sun / long shadow / rotated box. Resampling (raising the
-     sun a notch per retry) keeps every true landing on the sheet. */
+  /* Ramp: item 1 high sun / short shadow / square-on flat box; item
+     3 low sun / long shadow / rotated wedge whose four top corners
+     sit at four different heights. Resampling (raising the sun a
+     notch per retry) keeps every true landing on the sheet. */
 
   var ALT_LO = [50, 34, 20], ALT_HI = [62, 42, 26], THETA = [34, 26, 14];
+  var SLOPE = [0, 0.34, 0.5];
 
   function genItem(level) {
     var sunLeft = Math.random() < 0.5;
     var rot = level === 0 ? 0 : (level === 1 ? rand(-14, 14) : rand(24, 66) * (Math.random() < 0.5 ? 1 : -1));
     var hx = rand(0.62, 0.88), hz = rand(0.62, 0.88);
-    var bh = rand(1.05, 1.5);
-    var tries, alt, az, cx, cz, foot, truths, gn, ok, i, sgn, a0, go, cand;
+    var sm = SLOPE[level], sa = Math.random() * Math.PI * 2;
+    /* raising the base with the slope keeps every corner well above
+       the ground, so the top stays one honest plane */
+    var h0 = rand(1.0, 1.35) + sm * 0.85;
+    var gx = Math.cos(sa) * sm, gz = Math.sin(sa) * sm;
+    var tries, alt, az, cx, cz, foot, truths, hs, top, gn, ok, i, sgn, a0, go, cand;
     for (tries = 0; tries < 40; tries++) {
       alt = Math.min(64, rand(ALT_LO[level], ALT_HI[level]) + tries * 1.4);
       az = (sunLeft ? 180 : 0) + rand(-THETA[level], THETA[level]);
       cx = sunLeft ? rand(2.0, 3.0) : rand(GX - 3.0, GX - 2.0);
       cz = rand(2.3, 3.3);
       foot = boxFootprint(cx, cz, hx, hz, rot);
+      top = { h0: h0, gx: gx, gz: gz, cx: cx, cz: cz };
+      hs = [];
       truths = [];
       ok = true;
       for (i = 0; i < 4; i++) {
-        truths.push(projectCorner(foot[i].x, foot[i].z, bh, az, alt));
+        hs.push(Math.max(0.35, topHeight(top, foot[i].x, foot[i].z)));
+        truths.push(projectCorner(foot[i].x, foot[i].z, hs[i], az, alt));
         if (!inGround(truths[i], 0.45)) ok = false;
       }
       gn = null;
@@ -207,24 +276,57 @@
     }
     if (!gn) gn = { x: clamp(cx + (sunLeft ? 2 : -2), 0.6, GX - 0.6), z: 1.0 };
     return {
-      az: az, alt: alt, bh: bh,
+      az: az, alt: alt, top: top, hs: hs,
       foot: foot, truths: truths,
       diag: boundingDiag(foot.concat(truths)),
       gnomon: gn,
       handles: foot.map(function (p) { return { x: p.x, z: p.z }; }),
+      landed: [false, false, false, false],
+      errs: null,
     };
   }
 
   /* ==================== round state ==================== */
 
-  var round = 0, itemIdx = 0, itemScores = [], item = null;
-  var phase = 'idle'; /* 'place' | 'reveal' | 'done' */
+  var round = 0, itemIdx = 0, itemScores = [], item = null, reported = false;
+  var phase = 'idle'; /* 'idle' (pre-boot) | 'place' | 'reveal' | 'done' */
   var selIdx = -1;
-  var dragId = null, dragIdx = -1;
+  var dragId = null, dragIdx = -1, grabDX = 0, grabDY = 0;
 
+  function countLanded() {
+    var n = 0, i;
+    for (i = 0; i < 4; i++) if (item.landed[i]) n++;
+    return n;
+  }
+
+  function firstUnlanded() {
+    var i;
+    for (i = 0; i < 4; i++) if (!item.landed[i]) return i + 1;
+    return 0;
+  }
+
+  /* The hint teaches the given first, then the verb, then the tune. */
   function placeHint() {
-    return 'item ' + (itemIdx + 1) + ' of ' + ITEMS_PER_ROUND +
-      ' — drag the shadow corners into place, then press done.';
+    var head = 'item ' + (itemIdx + 1) + ' of ' + ITEMS_PER_ROUND + ' — ';
+    var n = countLanded();
+    if (n === 0) {
+      return head + 'the stick’s shadow is your ruler: every ray runs that same ' +
+        'direction, and the run grows with height. drag a ray from top corner ' +
+        firstUnlanded() + ' down to where it lands.';
+    }
+    if (n < 4) {
+      return head + n + ' of 4 rays run — pull one from corner ' + firstUnlanded() + ' next.';
+    }
+    return head + 'all four landed. drag any landing to fine-tune, then press done.';
+  }
+
+  /* Done stays locked until every ray is run: nothing to score before
+     that, and a stray tap can no longer end the item early. */
+  function syncDone() {
+    if (phase !== 'place') return;
+    var n = countLanded();
+    btnDone.disabled = n < 4;
+    btnDone.textContent = n < 4 ? 'run all 4 rays' : 'done ✓';
   }
 
   function newRound() {
@@ -232,26 +334,34 @@
     itemIdx = 0;
     itemScores = [];
     selIdx = -1;
-    dragId = null;
-    dragIdx = -1;
+    cancelDrag();
+    reported = false;
     item = genItem(0);
     phase = 'place';
     btnDone.hidden = false;
-    btnDone.textContent = 'done ✓';
+    syncDone();
     hudRound.textContent = String(round);
     hudScore.textContent = '–';
     hint.textContent = placeHint();
     draw();
   }
 
+  function scoreList() {
+    var out = [], i;
+    for (i = 0; i < itemScores.length; i++) out.push(Math.round(itemScores[i]));
+    return out.join(' · ');
+  }
+
   function finishRound() {
-    var res = ArtDaily.report(roundScore(itemScores));
     phase = 'done';
     btnDone.hidden = true;
+    if (reported) return;
+    reported = true;
+    var res = ArtDaily.report(roundScore(itemScores));
     hudScore.textContent = String(res.score);
     hudBest.textContent = res.best === null ? '–' : String(res.best);
-    hint.textContent = 'item 3: ' + Math.round(itemScores[2]) +
-      ' — round done. press “new round” to go again.';
+    hint.textContent = 'round done — items ' + scoreList() +
+      '. press “new round” to go again.';
     showToast((res.isNewBest ? 'new best! ' : 'score ') + res.score + ' / 100', res.isNewBest);
   }
 
@@ -268,9 +378,17 @@
     drawPlayerShadow(c);
     drawBox(c, dark);
     drawGnomon(c);
-    if (phase !== 'place') drawRays(c);
-    drawHandles(c);
-    drawSun(c);
+    drawPlayerRays(c);
+    if (phase !== 'place') { drawTruthRays(c); drawMisses(c); }
+    drawCorners(c);
+    drawLightCue(c);
+  }
+
+  function line(x1, y1, x2, y2) {
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
   }
 
   function polyPath(pts) {
@@ -283,6 +401,22 @@
 
   function groundPoly(pts) {
     polyPath(pts.map(function (p) { return toScreen(p.x, p.z, 0); }));
+  }
+
+  /* Graphite on a paper-coloured halo: legible over the grid, the
+     shadow washes and the form, in both themes. */
+  function inkText(c, txt, x, y, align, base, size) {
+    ctx.save();
+    ctx.font = '700 ' + size + 'px ' + MONO;
+    ctx.textAlign = align;
+    ctx.textBaseline = base;
+    ctx.lineWidth = 3;
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = c.card;
+    ctx.strokeText(txt, x, y);
+    ctx.fillStyle = c.ink;
+    ctx.fillText(txt, x, y);
+    ctx.restore();
   }
 
   function drawGrid(c) {
@@ -303,54 +437,52 @@
     ctx.globalAlpha = 1;
   }
 
+  /* Only landed corners shape the player's shadow, so before the
+     first ray there is nothing but the footprint on the ground. */
+  function landedPts() {
+    var pts = item.foot.slice(), i;
+    for (i = 0; i < 4; i++) if (item.landed[i]) pts.push(item.handles[i]);
+    return pts;
+  }
+
   function drawPlayerShadow(c) {
-    var i, a, b;
-    groundPoly(convexHull(item.foot.concat(item.handles)));
+    groundPoly(convexHull(landedPts()));
     ctx.fillStyle = c.ink;
     ctx.globalAlpha = 0.16;
     ctx.fill();
-    ctx.globalAlpha = 0.5;
+    ctx.globalAlpha = 0.62;   /* AA on the paper card; the wash is not */
     ctx.strokeStyle = c.ink;
     ctx.lineWidth = 1.5;
     ctx.setLineDash([6, 4]);
-    ctx.stroke();
-    /* drag trails: footprint corner → its handle */
-    ctx.strokeStyle = c.muted;
-    ctx.lineWidth = 1;
-    ctx.setLineDash([2, 5]);
-    ctx.beginPath();
-    for (i = 0; i < 4; i++) {
-      a = toScreen(item.foot[i].x, item.foot[i].z, 0);
-      b = toScreen(item.handles[i].x, item.handles[i].z, 0);
-      ctx.moveTo(a.x, a.y);
-      ctx.lineTo(b.x, b.y);
-    }
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.globalAlpha = 1;
   }
 
+  /* The wash says "sunlight"; the outline is the answer, so it is drawn
+     in the graphite-weight amber at full alpha (AA in both themes). */
   function drawTruth(c) {
     groundPoly(convexHull(item.foot.concat(item.truths)));
     ctx.fillStyle = c.accent;
     ctx.globalAlpha = 0.26;
     ctx.fill();
-    ctx.globalAlpha = 0.9;
-    ctx.strokeStyle = c.accent;
-    ctx.lineWidth = 2;
-    ctx.stroke();
     ctx.globalAlpha = 1;
+    ctx.strokeStyle = c.line;
+    ctx.lineWidth = 2.2;
+    ctx.stroke();
   }
 
-  /* Side faces are back-face culled by screen winding; shading is a
-     flat lambert vs the sun's azimuth. Values invert between the
-     themes on purpose: graphite on paper, chalk in night studio. */
+  /* Side faces are back-face culled by screen winding; every face is
+     then shaded by a real lambert — its own outward normal against
+     the real 3D light vector, including the tilted top. Values
+     invert between the themes on purpose: graphite on paper, chalk
+     in the night studio. */
   function drawBox(c, dark) {
-    var f = item.foot, fs = [], ts = [], i, j, quad, s, ex, ez, len, lit, b;
-    var sunX = Math.cos(item.az * DEG), sunZ = Math.sin(item.az * DEG);
+    var f = item.foot, fs = [], ts = [], i, j, quad, s;
+    var L = sunVector(item.az, item.alt);
     for (i = 0; i < 4; i++) {
       fs.push(toScreen(f[i].x, f[i].z, 0));
-      ts.push(toScreen(f[i].x, f[i].z, item.bh));
+      ts.push(toScreen(f[i].x, f[i].z, item.hs[i]));
     }
     for (i = 0; i < 4; i++) {
       j = (i + 1) % 4;
@@ -360,13 +492,9 @@
           (quad[2].x * quad[3].y - quad[3].x * quad[2].y) +
           (quad[3].x * quad[0].y - quad[0].x * quad[3].y);
       if (s >= 0) continue; /* facing away from the viewer */
-      ex = f[j].x - f[i].x; ez = f[j].z - f[i].z;
-      len = Math.hypot(ex, ez) || 1;
-      lit = (ez / len) * sunX + (-ex / len) * sunZ; /* outward · sun */
-      b = clamp(0.5 + 0.48 * lit, 0, 1);
-      paintFace(quad, c, b, dark);
+      paintFace(quad, c, 0.18 + 0.82 * lambert(wallNormal(f[i], f[j]), L), dark);
     }
-    paintFace(ts, c, 0.55 + 0.45 * Math.sin(item.alt * DEG), dark);
+    paintFace(ts, c, 0.18 + 0.82 * lambert(topNormal(item.top), L), dark);
   }
 
   function paintFace(pts, c, brightness, dark) {
@@ -398,6 +526,7 @@
     ctx.stroke();
     ctx.lineCap = 'butt';
     ctx.globalAlpha = 1;
+    inkText(c, 'your ruler', (a.x + b.x) / 2, Math.max(b.y, a.y) + 5, 'center', 'top', 10);
   }
 
   function drawGnomon(c) {
@@ -418,21 +547,17 @@
   }
 
   /* Screen direction toward the sun — the same linear map applied
-     to the 3D light vector, so reveal rays stay truly parallel. */
+     to the 3D light vector, so every ray drawn stays truly parallel. */
   function sunScreenDir() {
-    var a = item.az * DEG, al = item.alt * DEG;
-    var dx = Math.cos(a) * Math.cos(al), dz = Math.sin(a) * Math.cos(al), dy = Math.sin(al);
-    var sx = dx * view.exx + dz * view.ezx;
-    var sy = dx * view.exy + dz * view.ezy + dy * view.eyy;
+    var L = sunVector(item.az, item.alt);
+    var sx = L.x * view.exx + L.z * view.ezx;
+    var sy = L.x * view.exy + L.z * view.ezy + L.y * view.eyy;
     var l = Math.hypot(sx, sy) || 1;
     return { x: sx / l, y: sy / l };
   }
 
-  function sunPos() {
-    var cxg = 0, czg = 0, i, p, d, inset = 30, t = Infinity;
-    for (i = 0; i < 4; i++) { cxg += item.foot[i].x / 4; czg += item.foot[i].z / 4; }
-    p = toScreen(cxg, czg, item.bh);
-    d = sunScreenDir();
+  function frameExit(p, d, inset) {
+    var t = Infinity;
     if (d.x > 1e-6) t = Math.min(t, (W - inset - p.x) / d.x);
     if (d.x < -1e-6) t = Math.min(t, (inset - p.x) / d.x);
     if (d.y > 1e-6) t = Math.min(t, (H - inset - p.y) / d.y);
@@ -441,74 +566,169 @@
     return { x: p.x + d.x * t, y: p.y + d.y * t };
   }
 
-  function drawSun(c) {
-    var s = sunPos(), i, a;
-    ctx.strokeStyle = c.accent;
-    ctx.fillStyle = c.accent;
-    ctx.lineWidth = 2;
+  function arrowHead(x, y, dx, dy, r) {
+    var a = Math.atan2(dy, dx);
     ctx.beginPath();
-    ctx.arc(s.x, s.y, 8, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    for (i = 0; i < 8; i++) {
-      a = i * Math.PI / 4;
-      ctx.moveTo(s.x + Math.cos(a) * 11, s.y + Math.sin(a) * 11);
-      ctx.lineTo(s.x + Math.cos(a) * 16, s.y + Math.sin(a) * 16);
-    }
+    ctx.moveTo(x, y);
+    ctx.lineTo(x - Math.cos(a - 0.4) * r, y - Math.sin(a - 0.4) * r);
+    ctx.moveTo(x, y);
+    ctx.lineTo(x - Math.cos(a + 0.4) * r, y - Math.sin(a + 0.4) * r);
     ctx.stroke();
   }
 
-  /* One ray per corner: from the landing up to the top corner, and
-     a fainter stub from the corner back toward the sun. */
-  function drawRays(c) {
-    var d = sunScreenDir(), i, t, s;
-    ctx.strokeStyle = c.accent;
-    ctx.lineWidth = 1.5;
+  /* The sun is at infinity, so there is no disc to aim rays at — a
+     band of parallel arrows entering the sheet says "this direction,
+     everywhere", which is exactly what the reveal then draws.
+     Graphite core over an amber wash, so the cue reads as sunlight and
+     still clears AA in both themes: the wash is decoration (1.5:1 on
+     paper, 4.1:1 on the night sheet), the graphite core carries the
+     contrast — 10:1 on the card, 11:1 on the night sheet. */
+  function drawLightCue(c) {
+    var d = sunScreenDir(), i, k, sx, sy, ex, ey;
+    var cxg = 0, czg = 0;
+    for (i = 0; i < 4; i++) { cxg += item.foot[i].x / 4; czg += item.foot[i].z / 4; }
+    var anchor = frameExit(toScreen(cxg, czg, topHeight(item.top, cxg, czg)), d, 30);
+    var nx = -d.y, ny = d.x, len = 32;
+    ctx.save();
+    ctx.lineCap = 'round';
+    for (k = -1; k <= 1; k++) {
+      sx = anchor.x + nx * k * 12;
+      sy = anchor.y + ny * k * 12;
+      ex = sx - d.x * len;
+      ey = sy - d.y * len;
+      ctx.strokeStyle = c.accent;
+      ctx.globalAlpha = 0.6;
+      ctx.lineWidth = 6;
+      line(sx, sy, ex, ey);
+      ctx.strokeStyle = c.ink;
+      ctx.globalAlpha = 0.9;
+      ctx.lineWidth = 1.8;
+      line(sx, sy, ex, ey);
+      arrowHead(ex, ey, -d.x, -d.y, 7);
+    }
+    ctx.restore();
+    inkText(c, 'sun · parallel rays',
+      clamp(anchor.x + nx * 30, 78, W - 78), clamp(anchor.y + ny * 30, 8, H - 8),
+      'center', 'middle', 10);
+  }
+
+  /* The construction the player actually made: corner → landing.
+     It stays up through the reveal, faded, so your ray and the true
+     one can be read against each other. */
+  function drawPlayerRays(c) {
+    var i, t, s;
+    ctx.save();
+    ctx.strokeStyle = c.ink;
+    ctx.lineWidth = 1.4;
+    ctx.setLineDash([5, 4]);
+    /* faded through the reveal so the amber reads on top — but not below
+       AA, because your own construction is what you are comparing */
+    ctx.globalAlpha = phase === 'place' ? 0.6 : 0.56;
     for (i = 0; i < 4; i++) {
-      t = toScreen(item.foot[i].x, item.foot[i].z, item.bh);
+      if (!item.landed[i]) continue;
+      t = toScreen(item.foot[i].x, item.foot[i].z, item.hs[i]);
+      s = toScreen(item.handles[i].x, item.handles[i].z, 0);
+      line(t.x, t.y, s.x, s.y);
+    }
+    ctx.restore();
+  }
+
+  /* One true ray per corner: from the landing up to the top corner, and
+     a stub from the corner onward toward the sun. Both in the
+     graphite-weight amber — they are the answer, so they carry AA. */
+  function drawTruthRays(c) {
+    var d = sunScreenDir(), i, t, s;
+    ctx.save();
+    ctx.lineWidth = 1.6;
+    for (i = 0; i < 4; i++) {
+      t = toScreen(item.foot[i].x, item.foot[i].z, item.hs[i]);
       s = toScreen(item.truths[i].x, item.truths[i].z, 0);
       ctx.setLineDash([5, 4]);
-      ctx.globalAlpha = 0.75;
-      ctx.beginPath();
-      ctx.moveTo(s.x, s.y);
-      ctx.lineTo(t.x, t.y);
-      ctx.stroke();
-      ctx.globalAlpha = 0.35;
-      ctx.beginPath();
-      ctx.moveTo(t.x, t.y);
-      ctx.lineTo(t.x + d.x * 66, t.y + d.y * 66);
-      ctx.stroke();
+      ctx.strokeStyle = c.line;
+      ctx.globalAlpha = 1;
+      line(s.x, s.y, t.x, t.y);
+      ctx.globalAlpha = 0.9;   /* the stub says "and onward to the sun" */
+      line(t.x, t.y, t.x + d.x * 66, t.y + d.y * 66);
       ctx.setLineDash([]);
       ctx.globalAlpha = 1;
+      /* landing dot: wash amber inside a graphite rim, so the dot reads
+         as sunlight and its edge still clears AA on the paper sheet */
       ctx.fillStyle = c.accent;
       ctx.beginPath();
-      ctx.arc(s.x, s.y, 4, 0, Math.PI * 2);
+      ctx.arc(s.x, s.y, 4.5, 0, Math.PI * 2);
       ctx.fill();
+      ctx.lineWidth = 1.4;
+      ctx.strokeStyle = c.ink;
+      ctx.stroke();
+      ctx.lineWidth = 1.6;
+    }
+    ctx.restore();
+  }
+
+  /* Yours → true, per corner, with the worst one called out. */
+  function drawMisses(c) {
+    if (!item.errs) return;
+    var i, a, b, k = worstCorner(item.errs);
+    ctx.save();
+    ctx.strokeStyle = c.ink;
+    ctx.lineWidth = 1.6;
+    ctx.setLineDash([2, 3]);
+    ctx.globalAlpha = 0.75;
+    for (i = 0; i < 4; i++) {
+      a = toScreen(item.handles[i].x, item.handles[i].z, 0);
+      b = toScreen(item.truths[i].x, item.truths[i].z, 0);
+      line(a.x, a.y, b.x, b.y);
+    }
+    ctx.restore();
+    a = toScreen(item.handles[k].x, item.handles[k].z, 0);
+    if (item.errs[k] > 0.02) {
+      inkText(c, 'corner ' + (k + 1) + ' drifted most',
+        clamp(a.x, 80, W - 80), clamp(a.y + 16, 10, H - 10), 'center', 'top', 10);
     }
   }
 
-  function drawHandles(c) {
-    var i, p;
+  /* Numbered corners: the grip you pull a ray from, and the landing
+     it made. The numbers show the one-to-one pairing the score uses
+     and make the 1–4 keyboard picks discoverable. */
+  function drawCorners(c) {
+    var i, tp, gp, revealing = phase !== 'place';
     for (i = 0; i < 4; i++) {
-      p = toScreen(item.handles[i].x, item.handles[i].z, 0);
+      tp = toScreen(item.foot[i].x, item.foot[i].z, item.hs[i]);
+      if (!revealing) {
+        ctx.beginPath();
+        ctx.arc(tp.x, tp.y, item.landed[i] ? 4 : 7, 0, Math.PI * 2);
+        ctx.fillStyle = item.landed[i] ? c.ink : c.card;
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = c.ink;
+        ctx.stroke();
+      }
+      inkText(c, String(i + 1), tp.x, tp.y - 12, 'center', 'bottom', 11);
+      if (!item.landed[i] && !revealing) continue;
+
+      gp = toScreen(item.handles[i].x, item.handles[i].z, 0);
       ctx.beginPath();
-      ctx.arc(p.x, p.y, 9, 0, Math.PI * 2);
-      ctx.fillStyle = c.accent;
-      ctx.globalAlpha = 0.9;
+      ctx.arc(gp.x, gp.y, 9, 0, Math.PI * 2);
+      /* in the reveal amber means TRUE and graphite means yours, so
+         the two dot sets never have to be told apart by radius */
+      ctx.fillStyle = revealing ? c.ink : c.accent;
+      ctx.globalAlpha = revealing ? 1 : 0.9;
       ctx.fill();
       ctx.globalAlpha = 1;
-      ctx.strokeStyle = c.ink;
+      ctx.strokeStyle = revealing ? c.card : c.ink;
       ctx.lineWidth = 2;
       ctx.stroke();
-      ctx.fillStyle = c.ink;
+      ctx.fillStyle = revealing ? c.card : c.ink;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, 1.8, 0, Math.PI * 2);
+      ctx.arc(gp.x, gp.y, 1.8, 0, Math.PI * 2);
       ctx.fill();
+      if (!revealing) inkText(c, String(i + 1), gp.x + 12, gp.y, 'left', 'middle', 10);
       if (i === selIdx && phase === 'place') {
-        ctx.strokeStyle = c.accent;
+        ctx.strokeStyle = c.ink;
+        ctx.lineWidth = 1.5;
         ctx.setLineDash([3, 3]);
         ctx.beginPath();
-        ctx.arc(p.x, p.y, 14, 0, Math.PI * 2);
+        ctx.arc(gp.x, gp.y, 14, 0, Math.PI * 2);
         ctx.stroke();
         ctx.setLineDash([]);
       }
@@ -522,52 +742,96 @@
     return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
   }
 
+  /* The grab offset is kept, so a regrab never teleports a landing
+     you spent time placing out from under your finger. */
   function moveHandle(p) {
-    var g = toGround(p.x, p.y);
+    var g = toGround(p.x + grabDX, p.y + grabDY);
     item.handles[dragIdx] = {
       x: clamp(g.x, 0.2, GX - 0.2),
       z: clamp(g.z, 0.15, GZ - 0.15),
     };
-    draw();
   }
 
   canvas.addEventListener('pointerdown', function (ev) {
     if (!item || phase !== 'place' || dragId !== null) return;
     ev.preventDefault();
-    var p = pointerPos(ev), best = HANDLE_HIT, bi = -1, i, s, d;
+    canvas.focus();
+    var p = pointerPos(ev), best = hitRadius(), bi = -1, kind = null, i, s, d;
+    /* landings you already made come first — those are what you tune */
     for (i = 0; i < 4; i++) {
+      if (!item.landed[i]) continue;
       s = toScreen(item.handles[i].x, item.handles[i].z, 0);
       d = Math.hypot(p.x - s.x, p.y - s.y);
-      if (d < best) { best = d; bi = i; }
+      if (d < best) { best = d; bi = i; kind = 'move'; }
+    }
+    /* then the top corners: pressing one runs (or re-runs) its ray */
+    for (i = 0; i < 4; i++) {
+      s = toScreen(item.foot[i].x, item.foot[i].z, item.hs[i]);
+      d = Math.hypot(p.x - s.x, p.y - s.y);
+      if (d < best) { best = d; bi = i; kind = 'ray'; }
     }
     if (bi < 0) return;
     dragId = ev.pointerId;
     dragIdx = bi;
     selIdx = bi;
+    if (kind === 'move') {
+      s = toScreen(item.handles[bi].x, item.handles[bi].z, 0);
+      grabDX = s.x - p.x;
+      grabDY = s.y - p.y;
+    } else {
+      grabDX = 0;
+      grabDY = 0;
+      item.landed[bi] = true;
+      moveHandle(p);
+    }
     try { canvas.setPointerCapture(ev.pointerId); } catch (e) {}
-    moveHandle(p);
+    syncDone();
+    hint.textContent = placeHint();
+    draw();
   });
 
   canvas.addEventListener('pointermove', function (ev) {
     if (dragId === null || ev.pointerId !== dragId) return;
     ev.preventDefault();
     moveHandle(pointerPos(ev));
+    draw();
   });
 
+  /* Enter can score the item while a finger is still down (the canvas
+     has focus the moment you press it), so the phase may already be
+     'reveal' by the time the pointer lifts — never overwrite the
+     reveal's score line with the placing hint. */
   function endDrag(ev) {
     if (dragId === null || ev.pointerId !== dragId) return;
+    try { canvas.releasePointerCapture(dragId); } catch (e) {}
+    dragId = null;
+    dragIdx = -1;
+    if (phase === 'place') {
+      syncDone();
+      hint.textContent = placeHint();
+    }
+    draw();
+  }
+
+  /* Drop any in-flight drag: its grab offset was measured against the
+     old view, so carrying it across a relayout would teleport a landing. */
+  function cancelDrag() {
+    if (dragId === null) return;
+    try { canvas.releasePointerCapture(dragId); } catch (e) {}
     dragId = null;
     dragIdx = -1;
   }
   canvas.addEventListener('pointerup', endDrag);
   canvas.addEventListener('pointercancel', endDrag);
 
-  /* keyboard fallback: 1–4 picks a handle, arrows nudge it along
-     the ground grid, enter presses done/next */
+  /* keyboard fallback: 1–4 picks a corner, arrows run/nudge its
+     landing along the ground grid, enter presses done/next */
   canvas.addEventListener('keydown', function (ev) {
     if (!item) return;
     if (ev.key === 'Enter') {
-      if (!btnDone.hidden) btnDone.click();
+      /* never a dead end: done, then next, then a fresh round */
+      if (phase === 'done') newRound();
+      else if (!btnDone.hidden && !btnDone.disabled) btnDone.click();
       ev.preventDefault();
       return;
     }
@@ -581,6 +845,7 @@
     }
     if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight' && ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown') return;
     if (selIdx < 0) selIdx = 0;
+    item.landed[selIdx] = true;   /* the first nudge runs that ray */
     h = item.handles[selIdx];
     if (ev.key === 'ArrowLeft') h.x -= step;
     else if (ev.key === 'ArrowRight') h.x += step;
@@ -588,6 +853,8 @@
     else h.z -= step;
     h.x = clamp(h.x, 0.2, GX - 0.2);
     h.z = clamp(h.z, 0.15, GZ - 0.15);
+    syncDone();
+    hint.textContent = placeHint();
     draw();
     ev.preventDefault();
   });
@@ -595,27 +862,34 @@
   /* ==================== done / next / round flow ==================== */
 
   btnDone.addEventListener('click', function () {
-    if (!item) return;
+    if (!item || btnDone.disabled) return;
     if (phase === 'place') {
-      var sc = itemScore(item.handles, item.truths, item.diag);
-      itemScores.push(sc);
+      var n = 0, i;
+      for (i = 0; i < 4; i++) if (item.landed[i]) n++;
+      if (n < 4) return;
+      var r = itemScore(item.handles, item.truths, item.diag);
+      item.errs = r.errs;
+      itemScores.push(r.score);
       phase = 'reveal';
       draw();
       if (itemIdx === ITEMS_PER_ROUND - 1) {
         finishRound();
       } else {
+        btnDone.disabled = false;
         btnDone.textContent = 'next →';
-        hint.textContent = 'item ' + (itemIdx + 1) + ': ' + Math.round(sc) +
-          ' — amber is the true shadow. press next.';
+        hint.textContent = 'item ' + (itemIdx + 1) + ': ' + Math.round(r.score) +
+          '/100 — amber is the true shadow, the dotted hops show your miss. press next.';
       }
       return;
     }
     if (phase === 'reveal') {
       itemIdx += 1;
       selIdx = -1;
+      cancelDrag();   /* a pointer held across the reveal must not
+                         drag the fresh item's landing by an old offset */
       item = genItem(itemIdx);
       phase = 'place';
-      btnDone.textContent = 'done ✓';
+      syncDone();
       hint.textContent = placeHint();
       draw();
     }
@@ -644,7 +918,9 @@
   });
 
   ArtDaily.onTheme(draw);
-  window.addEventListener('resize', function () { fitCanvas(); draw(); });
+  /* Handles live in ground units, so a relayout costs nothing but the
+     grab offset of a drag that is still in flight. */
+  window.addEventListener('resize', function () { cancelDrag(); fitCanvas(); draw(); });
 
   /* ---- boot ---- */
   fitCanvas();
