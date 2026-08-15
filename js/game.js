@@ -453,7 +453,14 @@
     hudBest.textContent = res.best === null ? '–' : String(res.best);
     hint.textContent = 'round done — items ' + scoreList() +
       '. press “new round” to go again.';
-    showToast((res.isNewBest ? 'new best! ' : 'score ') + res.score + ' / 100', res.isNewBest);
+    /* A first-ever round has no previous best, so isNewBest is
+       trivially true and "new best!" celebrates nothing — on the one
+       round where the number most needs saying what it IS. The SDK
+       marks that round with isFirst; an older vendored SDK simply
+       leaves it undefined and the old wording stands. */
+    showToast(res.isFirst
+      ? 'first score ' + res.score + ' / 100 — your mark to beat'
+      : (res.isNewBest ? 'new best! ' : 'score ') + res.score + ' / 100', res.isNewBest);
   }
 
   /* ==================== painting ==================== */
