@@ -190,16 +190,27 @@
      accent is the wash amber (fills, haloes); line is the same amber at
      graphite weight, for the strokes that carry meaning — the wash is
      only 1.8:1 on the paper card, the line clears AA in both themes. */
+  /* The ONLY thing that moves any of these is the data-theme attribute
+     (see css/style.css), so reading them once per theme gives the same
+     answer as reading them once per repaint — minus a forced style
+     recalculation on every pointermove of every ray pulled. An empty read
+     (stylesheet not parsed yet) is never cached, so a cold boot still
+     corrects itself on the next frame. */
+  var inkCache = null, inkTheme = '';
   function inks() {
+    var t = ArtDaily.theme();
+    if (inkCache && inkTheme === t) return inkCache;
     var cs = getComputedStyle(document.documentElement);
     var accent = cs.getPropertyValue('--game-accent').trim() || cs.getPropertyValue('--sunny').trim();
-    return {
+    var c = {
       ink: cs.getPropertyValue('--ink').trim(),
       muted: cs.getPropertyValue('--muted').trim(),
       card: cs.getPropertyValue('--card').trim(),
       accent: accent,
       line: cs.getPropertyValue('--game-line').trim() || accent,
     };
+    if (c.ink && c.card) { inkCache = c; inkTheme = t; }
+    return c;
   }
 
   /* ---- crisp canvas at any devicePixelRatio; height tracks width ---- */
@@ -215,19 +226,28 @@
      on, so rotating a phone mid-item can never push a landing off-sheet */
   function activePatch() { return (item && item.patch) ? item.patch : patch; }
 
+  /* Assigning canvas.width BLANKS the sheet, so it is only assigned when
+     something really moved: a phone fires `resize` on every pixel of
+     address-bar slide, at an unchanged width, and each one used to
+     reallocate the backing store, rebuild the view and drop the drag in
+     flight — mid-pull, on the one gesture the whole drill is made of. */
+  var fitDpr = 0;
   function fitCanvas() {
     var rect = canvas.getBoundingClientRect();
-    W = Math.max(1, Math.round(rect.width));
+    var w = Math.max(1, Math.round(rect.width));
     /* a taller sheet on a phone: the form, its shadow and the ruler all
        need room the 0.62 ratio does not give at 330px */
-    H = Math.round(W * (W < 520 ? 0.72 : 0.62));
+    var h = Math.round(w * (w < 520 ? 0.72 : 0.62));
     var dpr = window.devicePixelRatio || 1;
+    if (w === W && h === H && dpr === fitDpr) return false;
+    W = w; H = h; fitDpr = dpr;
     canvas.width = Math.round(W * dpr);
     canvas.height = Math.round(H * dpr);
     canvas.style.height = H + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     patch = patchFor(W);
     makeView();
+    return true;
   }
 
   /* One oblique ground-plane view for everything: ground x runs
@@ -463,9 +483,26 @@
       : (res.isNewBest ? 'new best! ' : 'score ') + res.score + ' / 100', res.isNewBest);
   }
 
-  /* ==================== painting ==================== */
-
+  /* ==================== painting ====================
+     A trackpad or a pen hands over positions faster than the screen shows
+     them. Repainting synchronously inside every pointermove redrew the
+     entire scene — ground grid, box, gnomon, both shadows, every ray and
+     the ruler echo — three or four times over for one frame anybody saw.
+     draw() now only ASKS for the next frame; paint() runs once, right
+     before the browser composites, off the freshest position there is. */
+  var rafId = 0;
   function draw() {
+    if (rafId) return;
+    rafId = requestAnimationFrame(function () { rafId = 0; paint(); });
+  }
+  /* for paths that must not show a blank frame — a resize has already
+     cleared the sheet, so it repaints on the spot */
+  function paintNow() {
+    if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+    paint();
+  }
+
+  function paint() {
     var c = inks();
     var dark = ArtDaily.theme() === 'dark';
     ctx.clearRect(0, 0, W, H);
@@ -1114,13 +1151,24 @@
     btnHow.setAttribute('aria-expanded', String(!howTo.hidden));
   });
 
-  ArtDaily.onTheme(draw);
+  ArtDaily.onTheme(function () { inkCache = null; paintNow(); });
   /* the hardware can change mid-session (a laptop user plugs in a
      tablet): the pick radius and the dead zone follow it */
   ArtDaily.onInput(draw);
   /* Handles live in ground units, so a relayout costs nothing but the
-     grab offset of a drag that is still in flight. */
-  window.addEventListener('resize', function () { cancelDrag(); fitCanvas(); draw(); });
+     grab offset of a drag that is still in flight — which is why a resize
+     that moved nothing must not take that drag away. */
+  var resizeRaf = 0;
+  window.addEventListener('resize', function () {
+    if (resizeRaf) return;
+    resizeRaf = requestAnimationFrame(function () {
+      resizeRaf = 0;
+      var before = W;
+      if (!fitCanvas()) return;
+      if (before) cancelDrag();
+      paintNow();   /* fitCanvas already blanked the sheet — no empty frame */
+    });
+  });
 
   /* ---- boot ---- */
   fitCanvas();
