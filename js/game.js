@@ -1077,7 +1077,28 @@
   }
 
   /* ---- chrome wiring ---- */
-  document.getElementById('btnRound').addEventListener('click', newRound);
+  /* "new round" arms first when it would throw away a live round — a
+     second press within the window confirms, otherwise it snaps back.
+     An unfinished round is never reported, so a mis-tap here used to
+     bin every item scored so far without a word. (The five sibling
+     drills all guard this button; this one did not.) */
+  var btnRound = document.getElementById('btnRound');
+  var roundArmTimer = null, roundArmed = false;
+  function disarmRoundBtn() {
+    roundArmed = false;
+    clearTimeout(roundArmTimer);
+    btnRound.innerHTML = 'new round <span aria-hidden="true">↻</span>';
+  }
+  btnRound.addEventListener('click', function () {
+    if (itemScores.length && phase !== 'done' && !roundArmed) {
+      roundArmed = true;
+      btnRound.textContent = 'discard round?';
+      roundArmTimer = setTimeout(disarmRoundBtn, 2600);
+      return;
+    }
+    disarmRoundBtn();
+    newRound();
+  });
 
   var btnHow = document.getElementById('btnHow');
   var howTo = document.getElementById('howTo');
