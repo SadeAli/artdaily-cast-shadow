@@ -16,9 +16,16 @@
   var SLUG = 'cast-shadow';
   var ITEMS_PER_ROUND = 3;
   var DEG = Math.PI / 180;
-  var GX = 10, GZ = 6;   /* visible ground patch, in grid units */
+  /* Visible ground patch, in grid units. A narrow sheet gets a SMALLER
+     patch, not smaller everything: 10×6 units across a 330px phone canvas
+     put the whole form inside 35px with four corners to pick between. */
+  var PATCH_WIDE = { gx: 10, gz: 6 }, PATCH_NARROW = { gx: 8, gz: 5 };
   var GNOMON_H = 0.9;    /* height of the given stick */
   var MONO = 'ui-monospace, Menlo, Consolas, monospace';
+  var DEAD_ZONE = 0.012; /* forgiven first, as a fraction of the diagonal */
+  var DEAD_CAP = 0.12;   /* …but never more than this much of the ramp */
+  var SLOP_PX = 3;       /* pixel floor under it, eased per mode */
+  var SLOP_COARSE_PX = 8;
 
   /* ================= pure projection & scoring =================
      Directional light: azimuth az° in the ground plane (0 = +x,
@@ -84,13 +91,29 @@
     return Math.hypot(maxX - minX, maxZ - minZ);
   }
 
+  /* The dead zone — what is forgiven before the ramp starts — for the
+     hand in play, as a fraction of the shadow's diagonal. 0.012 of a
+     diagonal is ~1.7px on a 690px sheet and under 1px on a phone, i.e.
+     below the input device's own noise on every device except a nib, so
+     it gets a pixel floor: 3px eased per mode, 8px on a coarse screen,
+     converted into ground units through the view scale. Pure — pxPerUnit
+     and ease are injected. The 0.28 ramp itself is untouched, on every
+     device: this drill's difficulty is the proportional rule, not
+     steadiness, so widening the ramp would only pay people for not
+     running the rays. */
+  function deadZone(diag, pxPerUnit, ease, coarse) {
+    var px = Math.max(ease(SLOP_PX), coarse ? SLOP_COARSE_PX : 0);
+    var rel = ease(DEAD_ZONE);
+    if (pxPerUnit > 0 && diag > 0) rel = Math.max(rel, (px / pxPerUnit) / diag);
+    return Math.min(rel, DEAD_CAP);
+  }
+
   /* Mean handle→truth distance, normalized by the true shadow's
-     bounding diagonal: 100·clamp(1 − meanErr/0.28, 0, 1). A tiny
-     dead-zone (0.012 diagonals ≈ a couple of px) is forgiven first
-     so a pixel-perfect construction can genuinely reach 100. Also
-     returns the per-corner errors, so the reveal can point at the
-     one that went wrong. */
-  function itemScore(handles, truths, diag) {
+     bounding diagonal: 100·clamp(1 − meanErr/0.28, 0, 1), with the dead
+     zone forgiven first so a construction as good as the hand allows can
+     genuinely reach 100. Also returns the per-corner errors, so the
+     reveal can point at the one that went wrong. */
+  function itemScore(handles, truths, diag, dead) {
     var errs = [], i, sum = 0, d = diag || 1;
     if (!truths.length || handles.length !== truths.length) {
       return { score: 0, errs: errs };
@@ -99,7 +122,9 @@
       errs.push(Math.hypot(handles[i].x - truths[i].x, handles[i].z - truths[i].z) / d);
       sum += errs[i];
     }
-    var meanErr = Math.max(0, sum / truths.length - 0.012);
+    var mean = sum / truths.length;
+    if (!isFinite(mean)) return { score: 0, errs: errs };
+    var meanErr = Math.max(0, mean - (dead > 0 ? dead : DEAD_ZONE));
     return { score: 100 * Math.max(0, Math.min(1, 1 - meanErr / 0.28)), errs: errs };
   }
 
@@ -179,22 +204,41 @@
 
   /* ---- crisp canvas at any devicePixelRatio; height tracks width ---- */
   var W = 0, H = 0, view = null;
+  var patch = PATCH_WIDE;   /* the patch the NEXT item will be built on */
+  var COARSE = (function () {
+    try { return window.matchMedia('(pointer: coarse)').matches; } catch (e) { return false; }
+  })();
+
+  function ease(v) { return ArtDaily.ease(v); }
+  function patchFor(w) { return w < 520 ? PATCH_NARROW : PATCH_WIDE; }
+  /* the patch the drawing must obey: an item keeps the one it was built
+     on, so rotating a phone mid-item can never push a landing off-sheet */
+  function activePatch() { return (item && item.patch) ? item.patch : patch; }
+
   function fitCanvas() {
     var rect = canvas.getBoundingClientRect();
     W = Math.max(1, Math.round(rect.width));
-    H = Math.round(W * 0.62);
+    /* a taller sheet on a phone: the form, its shadow and the ruler all
+       need room the 0.62 ratio does not give at 330px */
+    H = Math.round(W * (W < 520 ? 0.72 : 0.62));
     var dpr = window.devicePixelRatio || 1;
     canvas.width = Math.round(W * dpr);
     canvas.height = Math.round(H * dpr);
     canvas.style.height = H + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    patch = patchFor(W);
     makeView();
   }
 
   /* One oblique ground-plane view for everything: ground x runs
-     right, ground z recedes up-right, height goes straight up. */
+     right, ground z recedes up-right, height goes straight up. The scale
+     is whatever makes the active patch fill the sheet — so a narrow patch
+     on a phone buys back the grid units the form is measured in. */
   function makeView() {
-    var s = W / 14;
+    var p = activePatch();
+    var wUnits = 0.8 + p.gx + 0.42 * p.gz + 0.7;  /* origin + runs + margin */
+    var hUnits = 1.1 + 0.52 * p.gz + 2.6;         /* baseline + depth + form */
+    var s = Math.min(W / wUnits, H / hUnits);
     view = {
       s: s,
       ox: 0.8 * s, oy: H - 1.1 * s,
@@ -205,8 +249,13 @@
   }
 
   /* Pick radius follows the view instead of being 30px everywhere:
-     ~1 grid unit at any size, floored so touch targets stay ≥44px. */
-  function hitRadius() { return clamp(1.05 * view.s, 22, 34); }
+     ~1 grid unit at any size, floored so touch targets stay ≥44px, and
+     never smaller than the zone this input mode needs — a screenless pen
+     tablet acquires these corners blind, which is the hardest thing it
+     does. */
+  function hitRadius() {
+    return Math.max(clamp(1.05 * view.s, 22, 34), ArtDaily.startRadius(24));
+  }
 
   function toScreen(gx, gz, h) {
     return {
@@ -226,7 +275,10 @@
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
   function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
-  function inGround(p, m) { return p.x >= m && p.x <= GX - m && p.z >= m && p.z <= GZ - m; }
+  function inGround(p, m, pp) {
+    var q = pp || activePatch();
+    return p.x >= m && p.x <= q.gx - m && p.z >= m && p.z <= q.gz - m;
+  }
 
   /* ==================== item generation ==================== */
   /* Ramp: item 1 high sun / short shadow / square-on flat box; item
@@ -238,6 +290,7 @@
   var SLOPE = [0, 0.34, 0.5];
 
   function genItem(level) {
+    var p = patch, gxMax = p.gx, gzMax = p.gz;
     var sunLeft = Math.random() < 0.5;
     var rot = level === 0 ? 0 : (level === 1 ? rand(-14, 14) : rand(24, 66) * (Math.random() < 0.5 ? 1 : -1));
     var hx = rand(0.62, 0.88), hz = rand(0.62, 0.88);
@@ -246,12 +299,18 @@
        the ground, so the top stays one honest plane */
     var h0 = rand(1.0, 1.35) + sm * 0.85;
     var gx = Math.cos(sa) * sm, gz = Math.sin(sa) * sm;
+    /* a first-ever round keeps the sun off the floor on the last item:
+       ALT_LO[2] = 20° triples the run, which is exactly where a copied
+       ruler goes to zero, and meeting that on your first visit is how a
+       round ends on a number nobody wants to repeat */
+    var lo = ALT_LO[level], hi = ALT_HI[level];
+    if (FIRST_VISIT && round <= 1 && level === 2) { lo = 28; hi = 34; }
     var tries, alt, az, cx, cz, foot, truths, hs, top, gn, ok, i, sgn, a0, go, cand;
     for (tries = 0; tries < 40; tries++) {
-      alt = Math.min(64, rand(ALT_LO[level], ALT_HI[level]) + tries * 1.4);
+      alt = Math.min(64, rand(lo, hi) + tries * 1.4);
       az = (sunLeft ? 180 : 0) + rand(-THETA[level], THETA[level]);
-      cx = sunLeft ? rand(2.0, 3.0) : rand(GX - 3.0, GX - 2.0);
-      cz = rand(2.3, 3.3);
+      cx = sunLeft ? rand(0.20, 0.30) * gxMax : rand(0.70, 0.80) * gxMax;
+      cz = rand(0.38, 0.55) * gzMax;
       foot = boxFootprint(cx, cz, hx, hz, rot);
       top = { h0: h0, gx: gx, gz: gz, cx: cx, cz: cz };
       hs = [];
@@ -260,7 +319,7 @@
       for (i = 0; i < 4; i++) {
         hs.push(Math.max(0.35, topHeight(top, foot[i].x, foot[i].z)));
         truths.push(projectCorner(foot[i].x, foot[i].z, hs[i], az, alt));
-        if (!inGround(truths[i], 0.45)) ok = false;
+        if (!inGround(truths[i], 0.45, p)) ok = false;
       }
       gn = null;
       if (ok) {
@@ -268,14 +327,15 @@
         go = shadowOffset(az, alt, GNOMON_H);
         for (sgn = 1; sgn >= -1; sgn -= 2) {
           cand = { x: cx - Math.sin(a0) * 1.9 * sgn, z: cz + Math.cos(a0) * 1.9 * sgn };
-          if (inGround(cand, 0.5) && inGround({ x: cand.x + go.x, z: cand.z + go.z }, 0.4)) { gn = cand; break; }
+          if (inGround(cand, 0.5, p) && inGround({ x: cand.x + go.x, z: cand.z + go.z }, 0.4, p)) { gn = cand; break; }
         }
         if (!gn) ok = false;
       }
       if (ok || tries === 39) break;
     }
-    if (!gn) gn = { x: clamp(cx + (sunLeft ? 2 : -2), 0.6, GX - 0.6), z: 1.0 };
+    if (!gn) gn = { x: clamp(cx + (sunLeft ? 2 : -2), 0.6, gxMax - 0.6), z: 1.0 };
     return {
+      patch: p,
       az: az, alt: alt, top: top, hs: hs,
       foot: foot, truths: truths,
       diag: boundingDiag(foot.concat(truths)),
@@ -292,6 +352,24 @@
   var phase = 'idle'; /* 'idle' (pre-boot) | 'place' | 'reveal' | 'done' */
   var selIdx = -1;
   var dragId = null, dragIdx = -1, grabDX = 0, grabDY = 0;
+  var dragType = '', lastPenAt = 0;
+  /* a press on a corner PICKS it; the ray is only run once the pointer has
+     actually travelled, so an exploratory tap on a screenless tablet does
+     not plant a landing you then have to find and drag back */
+  var pending = false, pressAt = null;
+  var MIN_DRAG = 6;
+
+  /* First-ever visit: two items, not three. Three items × four rays is
+     2–3 minutes before a single reported number. */
+  var FIRST_VISIT = ArtDaily.best() === null;
+  var itemsThisRound = ITEMS_PER_ROUND;
+
+  /* build an item on the current patch, then rescale the view to it */
+  function newItem(level) {
+    item = genItem(level);
+    makeView();
+    return item;
+  }
 
   function countLanded() {
     var n = 0, i;
@@ -305,17 +383,29 @@
     return 0;
   }
 
-  /* The hint teaches the given first, then the verb, then the tune. */
+  /* how many stick-heights tall a corner is — the whole lesson, as a
+     number the player can count */
+  function heightRatio(i) { return item.hs[i] / GNOMON_H; }
+  function ratioText(r) { return '×' + (Math.round(r * 10) / 10).toFixed(1); }
+
+  /* The hint teaches the given first, then the RULE, then the verb. The
+     rule — the shadow reaches as many times further as the corner is
+     times taller — was the one thing the drill never said out loud, which
+     is why copying the ruler's length felt like the intended move. */
   function placeHint() {
-    var head = 'item ' + (itemIdx + 1) + ' of ' + ITEMS_PER_ROUND + ' — ';
+    var head = 'item ' + (itemIdx + 1) + ' of ' + itemsThisRound + ' — ';
     var n = countLanded();
+    var i = firstUnlanded() - 1;
     if (n === 0) {
-      return head + 'the stick’s shadow is your ruler: every ray runs that same ' +
-        'direction, and the run grows with height. drag a ray from top corner ' +
-        firstUnlanded() + ' down to where it lands.';
+      return head + 'the stick is 1 tall and its shadow is your ruler: it shows which way ' +
+        'the light throws a shadow, and how far one stick-height reaches. corner ' +
+        (i + 1) + ' is about ' + ratioText(heightRatio(i)) + ' the stick, so its shadow ' +
+        'reaches about ' + ratioText(heightRatio(i)) + ' as far, the same direction. ' +
+        'drag from corner ' + (i + 1) + ' down to where it lands.';
     }
     if (n < 4) {
-      return head + n + ' of 4 rays run — pull one from corner ' + firstUnlanded() + ' next.';
+      return head + n + ' of 4 rays run — corner ' + (i + 1) + ' is ' +
+        ratioText(heightRatio(i)) + ' the stick. pull its ray next.';
     }
     return head + 'all four landed. drag any landing to fine-tune, then press done.';
   }
@@ -336,7 +426,8 @@
     selIdx = -1;
     cancelDrag();
     reported = false;
-    item = genItem(0);
+    itemsThisRound = (FIRST_VISIT && round === 1) ? 2 : ITEMS_PER_ROUND;
+    newItem(0);
     phase = 'place';
     btnDone.hidden = false;
     syncDone();
@@ -382,6 +473,23 @@
     if (phase !== 'place') { drawTruthRays(c); drawMisses(c); }
     drawCorners(c);
     drawLightCue(c);
+    if (phase === 'place') drawRulerEcho(c);
+  }
+
+  /* While a ray is being pulled, say how long it is IN RULERS. The whole
+     lesson is that the run scales with height, and without this the
+     player is eyeballing a ratio off an oblique projection — which is
+     what made copying the stick's own length feel like the intended
+     move. With it, the drill is measure-and-place. */
+  function drawRulerEcho(c) {
+    if (selIdx < 0 || !item.landed[selIdx]) return;
+    var ruler = GNOMON_H / Math.tan(item.alt * DEG);
+    if (!(ruler > 1e-6)) return;
+    var f = item.foot[selIdx], h = item.handles[selIdx];
+    var run = Math.hypot(h.x - f.x, h.z - f.z) / ruler;
+    var s = toScreen(h.x, h.z, 0);
+    inkText(c, ratioText(run) + ' the ruler', clamp(s.x, 52, W - 52),
+      clamp(s.y + 22, 12, H - 12), 'center', 'middle', 11);
   }
 
   function line(x1, y1, x2, y2) {
@@ -420,17 +528,17 @@
   }
 
   function drawGrid(c) {
-    var i, a, b;
+    var i, a, b, p = activePatch();
     ctx.strokeStyle = c.muted;
     ctx.lineWidth = 1;
     ctx.globalAlpha = 0.3;
     ctx.beginPath();
-    for (i = 0; i <= GX; i++) {
-      a = toScreen(i, 0, 0); b = toScreen(i, GZ, 0);
+    for (i = 0; i <= p.gx; i++) {
+      a = toScreen(i, 0, 0); b = toScreen(i, p.gz, 0);
       ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
     }
-    for (i = 0; i <= GZ; i++) {
-      a = toScreen(0, i, 0); b = toScreen(GX, i, 0);
+    for (i = 0; i <= p.gz; i++) {
+      a = toScreen(0, i, 0); b = toScreen(p.gx, i, 0);
       ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
     }
     ctx.stroke();
@@ -747,16 +855,22 @@
   function moveHandle(p) {
     var g = toGround(p.x + grabDX, p.y + grabDY);
     item.handles[dragIdx] = {
-      x: clamp(g.x, 0.2, GX - 0.2),
-      z: clamp(g.z, 0.15, GZ - 0.15),
+      x: clamp(g.x, 0.2, activePatch().gx - 0.2),
+      z: clamp(g.z, 0.15, activePatch().gz - 0.15),
     };
   }
 
-  canvas.addEventListener('pointerdown', function (ev) {
-    if (!item || phase !== 'place' || dragId !== null) return;
-    ev.preventDefault();
-    canvas.focus();
-    var p = pointerPos(ev), best = hitRadius(), bi = -1, kind = null, i, s, d;
+  /* Palm rejection: a pen press takes the sheet off a touch mid-drag, and
+     a touch press is ignored for a moment after any pen. pointerId
+     guarding alone only rejects the SECOND contact, and on a tablet the
+     palm is usually the first. */
+  function palmBlocked(ev) {
+    return ev.pointerType === 'touch' && lastPenAt && (Date.now() - lastPenAt) < 1200;
+  }
+
+  /* Nearest corner or landing to a press, within `reach`. */
+  function pickAt(p, reach) {
+    var best = reach, bi = -1, kind = null, i, s, d;
     /* landings you already made come first — those are what you tune */
     for (i = 0; i < 4; i++) {
       if (!item.landed[i]) continue;
@@ -764,36 +878,73 @@
       d = Math.hypot(p.x - s.x, p.y - s.y);
       if (d < best) { best = d; bi = i; kind = 'move'; }
     }
-    /* then the top corners: pressing one runs (or re-runs) its ray */
+    /* then the top corners: pressing one picks (and then runs) its ray.
+       Ties go to a corner whose ray is still unrun — that is the one you
+       are far more likely to have meant. */
     for (i = 0; i < 4; i++) {
       s = toScreen(item.foot[i].x, item.foot[i].z, item.hs[i]);
-      d = Math.hypot(p.x - s.x, p.y - s.y);
+      d = Math.hypot(p.x - s.x, p.y - s.y) - (item.landed[i] ? 0 : 6);
       if (d < best) { best = d; bi = i; kind = 'ray'; }
     }
-    if (bi < 0) return;
+    return bi < 0 ? null : { i: bi, kind: kind };
+  }
+
+  canvas.addEventListener('pointerdown', function (ev) {
+    if (!item || phase !== 'place') return;
+    if (ev.pointerType === 'pen') lastPenAt = Date.now();
+    if (palmBlocked(ev)) return;
+    if (dragId !== null) {
+      if (!(ev.pointerType === 'pen' && dragType === 'touch')) return;
+      cancelDrag();
+    }
+    ev.preventDefault();
+    canvas.focus();
+    var p = pointerPos(ev), s;
+    /* snap: a press up to 3× the reach still takes the nearest corner,
+       because a screenless tablet cannot see its own hand and a silent
+       miss there reads as "the page is frozen" */
+    var hit = pickAt(p, hitRadius()) || pickAt(p, 3 * hitRadius());
+    if (!hit) {
+      hint.textContent = 'nothing there to pull — press one of the numbered top corners ' +
+        '(near enough counts) and drag down to where its shadow lands.';
+      return;
+    }
     dragId = ev.pointerId;
-    dragIdx = bi;
-    selIdx = bi;
-    if (kind === 'move') {
-      s = toScreen(item.handles[bi].x, item.handles[bi].z, 0);
+    dragType = ev.pointerType;
+    dragIdx = hit.i;
+    selIdx = hit.i;
+    pressAt = p;
+    pending = (hit.kind === 'ray');
+    if (hit.kind === 'move') {
+      s = toScreen(item.handles[hit.i].x, item.handles[hit.i].z, 0);
       grabDX = s.x - p.x;
       grabDY = s.y - p.y;
     } else {
       grabDX = 0;
       grabDY = 0;
-      item.landed[bi] = true;
-      moveHandle(p);
     }
     try { canvas.setPointerCapture(ev.pointerId); } catch (e) {}
     syncDone();
-    hint.textContent = placeHint();
+    hint.textContent = pending
+      ? 'corner ' + (hit.i + 1) + ' picked — it is ' + ratioText(heightRatio(hit.i)) +
+        ' the stick. keep dragging, down to where its shadow lands.'
+      : placeHint();
     draw();
   });
 
   canvas.addEventListener('pointermove', function (ev) {
     if (dragId === null || ev.pointerId !== dragId) return;
     ev.preventDefault();
-    moveHandle(pointerPos(ev));
+    var p = pointerPos(ev);
+    if (pending) {
+      /* a tap is not a ray: the landing is only planted once the pointer
+         has travelled far enough to be a deliberate pull */
+      if (Math.hypot(p.x - pressAt.x, p.y - pressAt.y) < MIN_DRAG) return;
+      pending = false;
+      item.landed[dragIdx] = true;
+      syncDone();
+    }
+    moveHandle(p);
     draw();
   });
 
@@ -804,11 +955,19 @@
   function endDrag(ev) {
     if (dragId === null || ev.pointerId !== dragId) return;
     try { canvas.releasePointerCapture(dragId); } catch (e) {}
+    var wasPending = pending, i = dragIdx;
     dragId = null;
+    dragType = '';
     dragIdx = -1;
+    pending = false;
     if (phase === 'place') {
       syncDone();
-      hint.textContent = placeHint();
+      /* a press that never travelled was a look, not a ray: say which
+         corner is now picked instead of planting a landing on it */
+      hint.textContent = wasPending && i >= 0 && !item.landed[i]
+        ? 'corner ' + (i + 1) + ' is picked (' + ratioText(heightRatio(i)) + ' the stick) — ' +
+          'drag from it, or use the arrow keys, to run its ray.'
+        : placeHint();
     }
     draw();
   }
@@ -819,10 +978,16 @@
     if (dragId === null) return;
     try { canvas.releasePointerCapture(dragId); } catch (e) {}
     dragId = null;
+    dragType = '';
     dragIdx = -1;
+    pending = false;
   }
   canvas.addEventListener('pointerup', endDrag);
   canvas.addEventListener('pointercancel', endDrag);
+  /* a pointerup lost outside the canvas used to freeze the sheet, because
+     pointerdown returns early while one is in flight */
+  window.addEventListener('pointerup', endDrag);
+  window.addEventListener('pointercancel', endDrag);
 
   /* keyboard fallback: 1–4 picks a corner, arrows run/nudge its
      landing along the ground grid, enter presses done/next */
@@ -851,8 +1016,8 @@
     else if (ev.key === 'ArrowRight') h.x += step;
     else if (ev.key === 'ArrowUp') h.z += step;
     else h.z -= step;
-    h.x = clamp(h.x, 0.2, GX - 0.2);
-    h.z = clamp(h.z, 0.15, GZ - 0.15);
+    h.x = clamp(h.x, 0.2, activePatch().gx - 0.2);
+    h.z = clamp(h.z, 0.15, activePatch().gz - 0.15);
     syncDone();
     hint.textContent = placeHint();
     draw();
@@ -867,12 +1032,13 @@
       var n = 0, i;
       for (i = 0; i < 4; i++) if (item.landed[i]) n++;
       if (n < 4) return;
-      var r = itemScore(item.handles, item.truths, item.diag);
+      var r = itemScore(item.handles, item.truths, item.diag,
+        deadZone(item.diag, view.s, ease, COARSE));
       item.errs = r.errs;
       itemScores.push(r.score);
       phase = 'reveal';
       draw();
-      if (itemIdx === ITEMS_PER_ROUND - 1) {
+      if (itemIdx === itemsThisRound - 1) {
         finishRound();
       } else {
         btnDone.disabled = false;
@@ -887,10 +1053,13 @@
       selIdx = -1;
       cancelDrag();   /* a pointer held across the reveal must not
                          drag the fresh item's landing by an old offset */
-      item = genItem(itemIdx);
+      newItem(itemIdx);
       phase = 'place';
       syncDone();
-      hint.textContent = placeHint();
+      /* the rule quietly changes here — say so, instead of repeating
+         item 1's hint over a shape that no longer behaves like item 1 */
+      hint.textContent = (itemIdx === 1 ? 'the top is a slope now, so the four corners are ' +
+        'four different heights — each ray is its own length. ' : '') + placeHint();
       draw();
     }
   });
@@ -918,6 +1087,9 @@
   });
 
   ArtDaily.onTheme(draw);
+  /* the hardware can change mid-session (a laptop user plugs in a
+     tablet): the pick radius and the dead zone follow it */
+  ArtDaily.onInput(draw);
   /* Handles live in ground units, so a relayout costs nothing but the
      grab offset of a drag that is still in flight. */
   window.addEventListener('resize', function () { cancelDrag(); fitCanvas(); draw(); });
