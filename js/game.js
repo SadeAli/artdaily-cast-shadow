@@ -128,6 +128,39 @@
     return { score: 100 * Math.max(0, Math.min(1, 1 - meanErr / 0.28)), errs: errs };
   }
 
+  /* THE REVEAL HAS TO NAME THE RULE. The item line read "72/100 — amber is
+     the true shadow, the dotted hops show your miss": a number and a
+     colour key. This drill is ONE rule — a corner twice as tall throws its
+     shadow twice as far, along the way the ruler already runs — and the
+     reveal never said whether the player had it, on the round where that
+     is the only thing worth knowing. Two questions in the order they
+     matter: did the rays run the ruler's WAY, and then did they run far
+     enough? Pure: ground-unit points in, one sentence out — and an empty
+     string, never a guess, whenever the geometry cannot answer honestly. */
+  var BEARING_OK = 0.94;   /* mean cos of ray-vs-truth bearing ≈ 20° */
+  function ruleNote(handles, foot, truths) {
+    var n = truths ? truths.length : 0, i, mine = 0, real = 0, align = 0, pairs = 0;
+    var mx, mz, tx, tz, ml, tl, r;
+    if (!n || !handles || !foot || handles.length !== n || foot.length !== n) return '';
+    for (i = 0; i < n; i++) {
+      mx = handles[i].x - foot[i].x; mz = handles[i].z - foot[i].z;
+      tx = truths[i].x - foot[i].x; tz = truths[i].z - foot[i].z;
+      ml = Math.hypot(mx, mz); tl = Math.hypot(tx, tz);
+      if (!isFinite(ml) || !isFinite(tl)) return '';
+      mine += ml; real += tl;
+      if (ml > 1e-6 && tl > 1e-6) { align += (mx * tx + mz * tz) / (ml * tl); pairs++; }
+    }
+    if (!(real > 1e-9) || !isFinite(mine)) return '';
+    if (pairs && align / pairs < BEARING_OK) {
+      return 'the rays did not run the ruler’s way — take the direction off the stick’s shadow first, then the length.';
+    }
+    r = mine / real;
+    if (!isFinite(r)) return '';
+    if (r < 0.85) return 'direction good, reach short — the taller the corner, the further past one ruler its shadow goes.';
+    if (r > 1.18) return 'direction good, reach long — a corner only outruns the ruler by as much as it is taller than the stick.';
+    return 'that is the rule: direction off the ruler, length off the corner’s height.';
+  }
+
   function worstCorner(errs) {
     var k = 0, i;
     for (i = 1; i < errs.length; i++) if (errs[i] > errs[k]) k = i;
@@ -369,6 +402,7 @@
   /* ==================== round state ==================== */
 
   var round = 0, itemIdx = 0, itemScores = [], item = null, reported = false;
+  var lastNote = '';   /* the rule verdict of the item just scored */
   var phase = 'idle'; /* 'idle' (pre-boot) | 'place' | 'reveal' | 'done' */
   var selIdx = -1;
   var dragId = null, dragIdx = -1, grabDX = 0, grabDY = 0;
@@ -417,11 +451,18 @@
     var n = countLanded();
     var i = firstUnlanded() - 1;
     if (n === 0) {
-      return head + 'the stick is 1 tall and its shadow is your ruler: it shows which way ' +
-        'the light throws a shadow, and how far one stick-height reaches. corner ' +
-        (i + 1) + ' is about ' + ratioText(heightRatio(i)) + ' the stick, so its shadow ' +
-        'reaches about ' + ratioText(heightRatio(i)) + ' as far, the same direction. ' +
-        'drag from corner ' + (i + 1) + ' down to where it lands.';
+      /* The cold-open line, tightened. It used to open on "its shadow is
+         your ruler: IT shows which way…", where "it" could be the stick,
+         the shadow or the ruler, and then quote the same ratio twice in
+         one sentence ("about ×1.4 the stick, so its shadow reaches about
+         ×1.4 as far") — 285 characters, the longest first screen of the
+         six drills, on the one screen a beginner reads cold. Every FACT
+         is still here: the given, the rule, the verb, in that order. */
+      return head + 'the stick is 1 tall and its shadow is your ruler: one stick-height, ' +
+        'pointing the way every shadow here runs. corner ' + (i + 1) + ' is ' +
+        ratioText(heightRatio(i)) + ' the stick, so its shadow is ' +
+        ratioText(heightRatio(i)) + ' the ruler, same direction. ' +
+        'drag corner ' + (i + 1) + ' down to where it lands.';
     }
     if (n < 4) {
       return head + n + ' of 4 rays run — corner ' + (i + 1) + ' is ' +
@@ -430,13 +471,29 @@
     return head + 'all four landed. drag any landing to fine-tune, then press done.';
   }
 
+  /* The glyph on the primary button is DECORATION. Written straight into
+     textContent, a screen reader announced the drill's main control as
+     "done check mark" and then "next rightwards arrow" — the markup wraps
+     every other glyph in this drill (the ↻ on "new round") in aria-hidden
+     for exactly that reason, and the button a beginner presses first was
+     the one that did not. Same shape the sibling drills use. */
+  function setDoneLabel(txt, sym) {
+    btnDone.textContent = sym ? txt + ' ' : txt;
+    if (!sym) return;
+    var s = document.createElement('span');
+    s.setAttribute('aria-hidden', 'true');
+    s.textContent = sym;
+    btnDone.appendChild(s);
+  }
+
   /* Done stays locked until every ray is run: nothing to score before
      that, and a stray tap can no longer end the item early. */
   function syncDone() {
     if (phase !== 'place') return;
     var n = countLanded();
     btnDone.disabled = n < 4;
-    btnDone.textContent = n < 4 ? 'run all 4 rays' : 'done ✓';
+    if (n < 4) setDoneLabel('run all 4 rays', '');
+    else setDoneLabel('done', '✓');
   }
 
   function newRound() {
@@ -444,6 +501,7 @@
     itemIdx = 0;
     itemScores = [];
     selIdx = -1;
+    lastNote = '';   /* nothing from the last round may leak into this one */
     cancelDrag();
     reported = false;
     itemsThisRound = (FIRST_VISIT && round === 1) ? 2 : ITEMS_PER_ROUND;
@@ -471,8 +529,8 @@
     var res = ArtDaily.report(roundScore(itemScores));
     hudScore.textContent = String(res.score);
     hudBest.textContent = res.best === null ? '–' : String(res.best);
-    hint.textContent = 'round done — items ' + scoreList() +
-      '. press “new round” to go again.';
+    hint.textContent = 'round done — items ' + scoreList() + '. ' +
+      (lastNote ? lastNote + ' ' : '') + 'press “new round” to go again.';
     /* A first-ever round has no previous best, so isNewBest is
        trivially true and "new best!" celebrates nothing — on the one
        round where the number most needs saying what it IS. The SDK
@@ -1088,15 +1146,17 @@
         deadZone(item.diag, view.s, ease, COARSE));
       item.errs = r.errs;
       itemScores.push(r.score);
+      lastNote = ruleNote(item.handles, item.foot, item.truths);
       phase = 'reveal';
       draw();
       if (itemIdx === itemsThisRound - 1) {
         finishRound();
       } else {
         btnDone.disabled = false;
-        btnDone.textContent = 'next →';
+        setDoneLabel('next', '→');
         hint.textContent = 'item ' + (itemIdx + 1) + ': ' + Math.round(r.score) +
-          '/100 — amber is the true shadow, the dotted hops show your miss. press next.';
+          '/100 — ' + (lastNote ? lastNote + ' ' : '') +
+          'amber is the true shadow, the dotted hops show your miss. press next.';
       }
       return;
     }

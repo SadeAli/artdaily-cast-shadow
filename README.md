@@ -10,7 +10,10 @@ and for how far one stick-height of shadow runs.
 down to where you think its shadow lands, release. Four rays, then done —
 and the exact shadow inks itself over yours in amber, with a dotted hop
 from each of your landings to its true one and the worst corner called
-out. The rays you drew stay on the sheet: that *is* the construction.
+out. The score line then says whether you ran the rule — first whether
+the rays went the ruler's way at all, then whether they reached far
+enough (`ruleNote`, pure). The rays you drew stay on the sheet: that
+*is* the construction.
 
 **The rule is said out loud, and shown while you work.** The stick is 1
 tall; the hint names how many stick-heights the corner you are about to
