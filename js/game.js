@@ -696,6 +696,14 @@
     ctx.beginPath();
     ctx.arc(t.x, t.y, 3, 0, Math.PI * 2);
     ctx.fill();
+    /* The very first hint is built on two nouns — "the stick is 1 tall
+       and its shadow is your ruler" — and only one of them existed on
+       the sheet. Without this the reader has to work out which mark the
+       sentence means before the sentence can teach anything, and the
+       unit every ratio in the drill is quoted in ("×1.4 the stick") is
+       the one that was unlabelled. */
+    inkText(c, 'stick · 1 tall', clamp(t.x, 44, W - 44),
+      clamp(t.y - 7, 12, H - 6), 'center', 'bottom', 10);
   }
 
   /* Screen direction toward the sun — the same linear map applied
